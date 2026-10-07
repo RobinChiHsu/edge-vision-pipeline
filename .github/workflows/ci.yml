@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: edge
+          POSTGRES_PASSWORD: edge
+          POSTGRES_DB: edge_vision_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U edge -d edge_vision_test"
+          --health-interval 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -rs
+        env:
+          EDGE_VISION_TEST_POSTGRES_URL: postgresql+asyncpg://edge:edge@localhost:5432/edge_vision_test
+
+  end-to-end:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the stack
+        run: docker compose up --detach --build --wait --wait-timeout 300
+      - name: Wait for events from both cameras
+        run: |
+          for attempt in $(seq 60); do
+            entrance=$(curl -sf "localhost:8000/events?camera_id=entrance&limit=1" | jq '.items | length')
+            dock=$(curl -sf "localhost:8000/events?camera_id=loading-dock&limit=1" | jq '.items | length')
+            if [ "$entrance" = 1 ] && [ "$dock" = 1 ]; then break; fi
+            sleep 2
+          done
+          curl -sf localhost:8000/cameras | jq .
+          curl -sf "localhost:8000/events?limit=5" | jq .
+          test "$entrance" = 1 && test "$dock" = 1
+      - name: Check events are published over MQTT
+        run: docker compose exec -T mosquitto mosquitto_sub -t 'edge-vision/cameras/+/events' -C 1 -W 60
+      - name: Show logs
+        if: failure()
+        run: docker compose logs
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes
