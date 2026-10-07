@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: edge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edge-demo}
+      POSTGRES_DB: edge_vision
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "edge", "-d", "edge_vision"]
+      interval: 5s
+      retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: mosquitto -c /mosquitto-no-auth.conf
+    ports:
+      - "1883:1883"
+
+  mediamtx:
+    image: bluenviron/mediamtx:1-ffmpeg
+    volumes:
+      - ./docker/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8554:8554"
+
+  app:
+    build: .
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edge-demo}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+      mediamtx:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres-data:
