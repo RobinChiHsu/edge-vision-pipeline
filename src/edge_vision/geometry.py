@@ -101,7 +101,8 @@ class Line:
         origin, target = self.side(before), self.side(after)
         if Side.ON in (origin, target) or origin is target:
             return None
-        if _cross(before, after, self.start) * _cross(before, after, self.end) > 0:
+        first, second = sorted((before, after), key=lambda point: (point.x, point.y))
+        if _cross(first, second, self.start) * _cross(first, second, self.end) > 0:
             return None
         return target
 

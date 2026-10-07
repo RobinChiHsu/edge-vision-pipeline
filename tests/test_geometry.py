@@ -1,5 +1,5 @@
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
 from edge_vision.geometry import BBox, Line, Point, Polygon, Side
@@ -106,6 +106,7 @@ class TestLine:
             Line(Point(1, 1), Point(1, 1))
 
     @given(POINT, POINT, POINT, POINT)
+    @example(Point(0, 0), Point(-1, 7.2e-126), Point(-2, 1), Point(-1, 0))
     def test_reversed_movement_reports_opposite_side(
         self, a: Point, b: Point, start: Point, end: Point
     ) -> None:
