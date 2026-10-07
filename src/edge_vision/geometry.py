@@ -98,13 +98,16 @@ class Line:
         return Side.ON
 
     def crossing(self, before: Point, after: Point) -> Side | None:
-        origin, target = self.side(before), self.side(after)
-        if Side.ON in (origin, target) or origin is target:
+        origin, target = self._half_plane(before), self._half_plane(after)
+        if origin is target:
             return None
         first, second = sorted((before, after), key=lambda point: (point.x, point.y))
         if _cross(first, second, self.start) * _cross(first, second, self.end) > 0:
             return None
         return target
+
+    def _half_plane(self, point: Point) -> Side:
+        return Side.RIGHT if _cross(self.start, self.end, point) >= 0 else Side.LEFT
 
 
 def _cross(origin: Point, towards: Point, point: Point) -> float:

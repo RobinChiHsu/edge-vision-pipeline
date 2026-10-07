@@ -1,3 +1,5 @@
+from itertools import pairwise
+
 import pytest
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
@@ -98,8 +100,19 @@ class TestLine:
     def test_movement_on_one_side_is_not_a_crossing(self) -> None:
         assert self.DOWNWARD.crossing(Point(5, 5), Point(1, 5)) is None
 
-    def test_touching_the_line_is_not_a_crossing(self) -> None:
-        assert self.DOWNWARD.crossing(Point(5, 5), Point(0, 5)) is None
+    def test_points_on_the_line_count_as_right_side(self) -> None:
+        on_line = Point(0, 5)
+
+        assert self.DOWNWARD.crossing(Point(5, 5), on_line) is Side.RIGHT
+        assert self.DOWNWARD.crossing(on_line, Point(-5, 5)) is None
+        assert self.DOWNWARD.crossing(on_line, Point(5, 5)) is Side.LEFT
+
+    def test_stepping_onto_the_line_and_beyond_counts_once(self) -> None:
+        path = [Point(5, 5), Point(0, 5), Point(-5, 5)]
+
+        crossings = [self.DOWNWARD.crossing(a, b) for a, b in pairwise(path)]
+
+        assert [c for c in crossings if c is not None] == [Side.RIGHT]
 
     def test_rejects_zero_length_line(self) -> None:
         with pytest.raises(ValueError, match="length"):
