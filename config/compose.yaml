@@ -1,0 +1,36 @@
+database_url: postgresql+asyncpg://edge:${POSTGRES_PASSWORD}@postgres:5432/edge_vision
+
+mqtt:
+  host: mosquitto
+
+detector:
+  type: motion
+  min_area: 800
+
+tracker:
+  min_hits: 2
+  max_missed: 10
+
+cameras:
+  - id: entrance
+    url: rtsp://mediamtx:8554/entrance
+    max_fps: 10
+    rules:
+      - type: line
+        id: doorway
+        start: [320, 0]
+        end: [320, 360]
+      - type: zone
+        id: restricted
+        polygon: [[480, 0], [640, 0], [640, 360], [480, 360]]
+        min_dwell: 0.5
+
+  - id: loading-dock
+    url: rtsp://mediamtx:8554/loading-dock
+    max_fps: 10
+    rules:
+      - type: line
+        id: gate
+        start: [0, 180]
+        end: [640, 180]
+        direction: right

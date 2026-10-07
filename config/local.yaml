@@ -1,0 +1,23 @@
+database_url: ${EDGE_VISION_DATABASE_URL:-sqlite+aiosqlite:///edge-vision.db}
+
+detector:
+  type: motion
+  min_area: 800
+
+tracker:
+  min_hits: 2
+  max_missed: 10
+
+cameras:
+  - id: entrance
+    url: ${EDGE_VISION_CAMERA_URL:-rtsp://localhost:8554/entrance}
+    max_fps: 10
+    rules:
+      - type: line
+        id: doorway
+        start: [320, 0]
+        end: [320, 360]
+      - type: zone
+        id: restricted
+        polygon: [[480, 0], [640, 0], [640, 360], [480, 360]]
+        min_dwell: 0.5
