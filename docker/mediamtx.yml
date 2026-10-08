@@ -12,7 +12,7 @@ paths:
     runOnInit: >-
       ffmpeg -re -f lavfi -i color=c=0x283040:s=640x360:r=15
       -f lavfi -i color=c=0xf0d080:s=120x80:r=15
-      -filter_complex [0][1]overlay=x=260:y='mod(t*60\,460)-90'
+      -filter_complex [0][1]overlay=x='mod(t*47\,520)':y='mod(t*60\,460)-90'
       -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 30
       -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnInitRestart: yes
