@@ -10,6 +10,12 @@ It is built on two small libraries developed alongside it:
 [rtsp-supervisor](https://github.com/RobinChiHsu/rtsp-supervisor) for resilient stream ingest and
 [typed-mqtt-bus](https://github.com/RobinChiHsu/typed-mqtt-bus) for typed messaging.
 
+![Live events from the docker compose demo](docs/demo.gif)
+
+The recording shows the [quick start](#quick-start) stack: two synthetic cameras are streaming,
+line crossings and zone entries arrive over the WebSocket as they happen, and the per-rule counters
+in `/cameras` keep up with them.
+
 ```
             ┌──────────────── per camera ─────────────────┐
  RTSP ──▶ rtsp-supervisor ──▶ Detector ──▶ Tracker ──▶ Rules ──▶ Event
