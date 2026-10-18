@@ -98,6 +98,11 @@ tracker:
   min_hits: 2
   max_missed: 10
 
+pipeline_restart:           # optional; backoff when a camera pipeline crashes
+  initial_delay: 1          # seconds before the first restart, doubles on each crash
+  max_delay: 60             # upper bound for the delay
+  stable_after: 30          # a run this long resets the delay to initial_delay
+
 cameras:
   - id: entrance
     url: rtsp://viewer:${CAMERA_PASSWORD}@192.168.1.20/stream1
@@ -127,13 +132,18 @@ live in the file. Camera URLs and the database URL are stored as secrets and nev
 `repr` or API responses. The configuration is validated completely at start-up: unknown keys,
 duplicate ids, degenerate polygons and zero-length lines are rejected with a clear message.
 
+If a camera pipeline crashes on an unexpected exception, it is logged and restarted on the same
+stream after an exponential backoff with jitter, without affecting the other cameras. The number
+of restarts is reported as `pipeline_restarts` in `/cameras`; `pipeline_running` and `healthy` are
+`false` while a pipeline waits to be restarted.
+
 ## API
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /healthz` | Liveness |
 | `GET /readyz` | Database reachability and camera health, `503` when the database is down |
-| `GET /cameras`, `GET /cameras/{id}` | Stream state, reconnects, last error, frames processed and skipped, inference latency, zone occupancy, line counts |
+| `GET /cameras`, `GET /cameras/{id}` | Stream state, reconnects, last error, pipeline restarts, frames processed and skipped, inference latency, zone occupancy, line counts |
 | `GET /events` | Filter by `camera_id`, `rule_id`, `kind`, `label`, `since`, `until`; keyset pagination with `limit` and `cursor` |
 | `GET /events/{id}` | A single event |
 | `GET /delivery` | Delivered, failed and dropped events per sink |

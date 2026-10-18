@@ -24,6 +24,7 @@ def camera_status(camera_id: str = "gate", healthy: bool = True) -> CameraStatus
         stream_state="streaming",
         healthy=healthy,
         pipeline_running=True,
+        pipeline_restarts=0,
         frames_read=10,
         frames_dropped=1,
         reconnect_attempts=0,

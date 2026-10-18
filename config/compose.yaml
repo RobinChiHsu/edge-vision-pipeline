@@ -11,6 +11,11 @@ tracker:
   min_hits: 2
   max_missed: 10
 
+pipeline_restart:
+  initial_delay: 1
+  max_delay: 60
+  stable_after: 30
+
 cameras:
   - id: entrance
     url: rtsp://mediamtx:8554/entrance

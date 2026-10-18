@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Sequence
@@ -12,6 +13,7 @@ from typed_mqtt_bus.mqtt import AiomqttTransport
 
 from edge_vision.config import AppConfig, CameraConfig, MqttConfig
 from edge_vision.detectors import Frame
+from edge_vision.pipeline import CameraPipeline, FrameFeed
 from edge_vision.rules import RuleHit
 from edge_vision.runtime import Runtime, _rule_status, connect_mqtt, open_camera
 from edge_vision.storage import EventQuery
@@ -92,21 +94,92 @@ async def test_failed_startup_releases_resources(tmp_path: Path) -> None:
             pass
 
 
-async def test_crashed_pipeline_is_logged_and_reported(
+def restart_delays(caplog: pytest.LogCaptureFixture) -> list[float]:
+    prefix = "restarting pipeline for camera lab in "
+    return [
+        float(record.getMessage().removeprefix(prefix).removesuffix("s"))
+        for record in caplog.records
+        if record.getMessage().startswith(prefix)
+    ]
+
+
+async def test_crashed_pipeline_restarts_and_recovers(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def explode(self: object, feed: object) -> None:
-        raise RuntimeError("pipeline bug")
+    real_run = CameraPipeline.run
+    crashes = 0
 
-    monkeypatch.setattr("edge_vision.pipeline.CameraPipeline.run", explode)
+    async def crash_twice(self: CameraPipeline, feed: FrameFeed) -> None:
+        nonlocal crashes
+        if crashes < 2:
+            crashes += 1
+            raise RuntimeError("pipeline bug")
+        await real_run(self, feed)
 
-    with caplog.at_level(logging.ERROR):
-        async with Runtime(make_config(tmp_path), source_factory=synthetic_camera) as runtime:
-            await wait_until(lambda: not runtime.camera_statuses()[0].pipeline_running)
+    monkeypatch.setattr(CameraPipeline, "run", crash_twice)
+    config = make_config(tmp_path, pipeline_restart={"initial_delay": 0.01, "max_delay": 1})
+
+    with caplog.at_level(logging.INFO, logger="edge_vision.runtime"):
+        async with Runtime(config, source_factory=synthetic_camera) as runtime:
+            await wait_until(lambda: runtime.camera_statuses()[0].events_emitted >= 1, within=6.0)
             [status] = runtime.camera_statuses()
 
+    assert status.pipeline_restarts == 2
+    assert status.pipeline_running
+    assert caplog.text.count("pipeline for camera lab crashed") == 2
+
+
+async def test_restart_delay_grows_up_to_the_maximum(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def explode(self: CameraPipeline, feed: FrameFeed) -> None:
+        raise RuntimeError("pipeline bug")
+
+    monkeypatch.setattr(CameraPipeline, "run", explode)
+    config = make_config(tmp_path, pipeline_restart={"initial_delay": 0.01, "max_delay": 0.04})
+
+    with caplog.at_level(logging.INFO, logger="edge_vision.runtime"):
+        async with Runtime(config, source_factory=synthetic_camera) as runtime:
+            await wait_until(lambda: runtime.camera_statuses()[0].pipeline_restarts >= 4)
+            [status] = runtime.camera_statuses()
+
+    delays = restart_delays(caplog)[:4]
+    assert [round(delay, 2) for delay in delays] == [0.01, 0.02, 0.04, 0.04]
     assert not status.healthy
-    assert "pipeline for camera lab crashed" in caplog.text
+
+
+async def test_stable_run_resets_restart_delay(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def explode(self: CameraPipeline, feed: FrameFeed) -> None:
+        raise RuntimeError("pipeline bug")
+
+    monkeypatch.setattr(CameraPipeline, "run", explode)
+    restart = {"initial_delay": 0.01, "max_delay": 1, "stable_after": 0}
+    config = make_config(tmp_path, pipeline_restart=restart)
+
+    with caplog.at_level(logging.INFO, logger="edge_vision.runtime"):
+        async with Runtime(config, source_factory=synthetic_camera) as runtime:
+            await wait_until(lambda: runtime.camera_statuses()[0].pipeline_restarts >= 3)
+
+    assert [round(delay, 2) for delay in restart_delays(caplog)[:3]] == [0.01, 0.01, 0.01]
+
+
+async def test_pipeline_is_not_restarted_after_a_clean_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def finish(self: CameraPipeline, feed: FrameFeed) -> None:
+        return None
+
+    monkeypatch.setattr(CameraPipeline, "run", finish)
+    config = make_config(tmp_path, pipeline_restart={"initial_delay": 0.01})
+
+    async with Runtime(config, source_factory=synthetic_camera) as runtime:
+        await asyncio.sleep(0.1)
+        [status] = runtime.camera_statuses()
+
+    assert not status.pipeline_running
+    assert status.pipeline_restarts == 0
 
 
 def test_default_factories_build_real_clients(tmp_path: Path) -> None:
