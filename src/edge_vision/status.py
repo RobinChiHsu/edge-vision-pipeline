@@ -15,6 +15,7 @@ class CameraStatus(BaseModel):
     stream_state: str
     healthy: bool
     pipeline_running: bool
+    pipeline_restarts: int
     frames_read: int
     frames_dropped: int
     reconnect_attempts: int

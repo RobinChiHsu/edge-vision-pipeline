@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import TracebackType
 
-from rtsp_supervisor import FrameSource, StreamSupervisor, SupervisorConfig
+from rtsp_supervisor import ExponentialBackoff, FrameSource, StreamSupervisor, SupervisorConfig
 from rtsp_supervisor.opencv import OpenCVSource
 from typed_mqtt_bus import Bus, InMemoryBroker, Transport
 from typed_mqtt_bus.mqtt import AiomqttTransport
 
-from .config import AppConfig, CameraConfig, MqttConfig
+from .config import AppConfig, CameraConfig, MqttConfig, RestartConfig
 from .detectors import Frame
 from .pipeline import CameraPipeline
 from .rules import LineRule, Rule, ZoneRule
@@ -48,15 +49,37 @@ class Camera:
     config: CameraConfig
     supervisor: StreamSupervisor[Frame]
     pipeline: CameraPipeline
-    task: asyncio.Task[None]
+    restart: RestartConfig
+    restarts: int = field(default=0, init=False)
+    running: bool = field(default=True, init=False)
+
+    async def run(self) -> None:
+        backoff = ExponentialBackoff(self.restart.initial_delay, self.restart.max_delay)
+        while True:
+            started = time.monotonic()
+            self.running = True
+            try:
+                await self.pipeline.run(self.supervisor)
+                return
+            except Exception:
+                logger.exception("pipeline for camera %s crashed", self.config.id)
+            finally:
+                self.running = False
+            if time.monotonic() - started >= self.restart.stable_after:
+                backoff.reset()
+            delay = backoff.next_delay()
+            logger.info("restarting pipeline for camera %s in %.3fs", self.config.id, delay)
+            await asyncio.sleep(delay)
+            self.restarts += 1
 
     def status(self) -> CameraStatus:
         stream, stats = self.supervisor.stats, self.pipeline.stats
         return CameraStatus(
             id=self.config.id,
             stream_state=stream.state.value,
-            healthy=self.supervisor.is_healthy(HEALTHY_STALENESS) and not self.task.done(),
-            pipeline_running=not self.task.done(),
+            healthy=self.supervisor.is_healthy(HEALTHY_STALENESS) and self.running,
+            pipeline_running=self.running,
+            pipeline_restarts=self.restarts,
             frames_read=stream.frames_read,
             frames_dropped=stream.frames_dropped,
             reconnect_attempts=stream.reconnect_attempts,
@@ -143,20 +166,15 @@ class Runtime:
             fan_out,
             max_fps=camera.max_fps,
         )
-        task = asyncio.create_task(pipeline.run(supervisor), name=f"pipeline-{camera.id}")
-        task.add_done_callback(lambda done: _report_exit(camera.id, done))
+        runner = Camera(camera, supervisor, pipeline, self._config.pipeline_restart)
+        task = asyncio.create_task(runner.run(), name=f"pipeline-{camera.id}")
         self._stack.push_async_callback(_cancel, task)
-        return Camera(camera, supervisor, pipeline, task)
+        return runner
 
 
 async def _cancel(task: asyncio.Task[None]) -> None:
     task.cancel()
     await asyncio.wait({task})
-
-
-def _report_exit(camera_id: str, task: asyncio.Task[None]) -> None:
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("pipeline for camera %s crashed", camera_id, exc_info=task.exception())
 
 
 def _rule_status(rule: Rule) -> RuleStatus:

@@ -129,11 +129,24 @@ class MqttConfig(_Strict):
     password: SecretStr | None = None
 
 
+class RestartConfig(_Strict):
+    initial_delay: float = Field(default=1.0, gt=0)
+    max_delay: float = Field(default=60.0, gt=0)
+    stable_after: float = Field(default=30.0, ge=0)
+
+    @model_validator(mode="after")
+    def _ordered_delays(self) -> Self:
+        if self.max_delay < self.initial_delay:
+            raise ValueError("max_delay must be greater than or equal to initial_delay")
+        return self
+
+
 class AppConfig(_Strict):
     database_url: SecretStr
     mqtt: MqttConfig | None = None
     detector: DetectorConfig = Field(default_factory=MotionDetectorConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    pipeline_restart: RestartConfig = Field(default_factory=RestartConfig)
     cameras: list[CameraConfig] = Field(min_length=1)
 
     @model_validator(mode="after")

@@ -123,6 +123,10 @@ def test_yolo_config_builds_onnx_detector(monkeypatch: pytest.MonkeyPatch) -> No
         ({"cameras": [{"id": "Gate/1", "url": "a"}]}, "pattern"),
         ({"cameras": [{"id": "gate", "url": "a", "max_fps": 0}]}, "greater than 0"),
         ({"unknown": True}, "Extra inputs"),
+        (
+            {"pipeline_restart": {"initial_delay": 5, "max_delay": 1}},
+            "max_delay must be greater than or equal to initial_delay",
+        ),
     ],
 )
 def test_rejects_invalid_app_config(overrides: dict[str, object], message: str) -> None:
