@@ -1,0 +1,37 @@
+name: Notify Discord on Issue/PR
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord embed
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_NOTIFY_WEBHOOK }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "no DISCORD_NOTIFY_WEBHOOK secret, skip"; exit 0; fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            TITLE="New PR #${PR_NUMBER}: ${PR_TITLE}"
+            URL="$PR_URL"
+            BRANCH="$PR_BRANCH"
+          else
+            TITLE="New Issue: ${ISSUE_TITLE}"
+            URL="$ISSUE_URL"
+            BRANCH=""
+          fi
+          PAYLOAD=$(jq -n --arg t "$TITLE" --arg u "$URL" --arg repo "$REPO" --arg branch "$BRANCH" \
+            '{embeds:[{title:$t, url:$u, description:("Repo: " + $repo + (if $branch != "" then "\nBranch: " + $branch else "" end))}]}')
+          curl -sS -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK"
