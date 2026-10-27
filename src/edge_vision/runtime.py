@@ -86,7 +86,11 @@ class Runtime:
         self._stack = AsyncExitStack()
         self._cameras: list[Camera] = []
         self._fan_out: FanOut | None = None
-        self._sessions = SessionPool(intra_op_threads=config.onnx.intra_op_threads)
+        self._sessions = SessionPool(
+            intra_op_threads=config.onnx.intra_op_threads,
+            max_batch=config.onnx.max_batch,
+            max_batch_delay=config.onnx.max_batch_delay_ms / 1000,
+        )
         self.repository: SqlEventRepository
         self.bus: Bus
 
@@ -115,6 +119,7 @@ class Runtime:
     async def _start(self) -> None:
         self.repository = SqlEventRepository.from_url(self._config.database_url.get_secret_value())
         self._stack.push_async_callback(self.repository.close)
+        self._stack.callback(self._sessions.close)
         await self.repository.create_schema()
         transport = await self._stack.enter_async_context(self._open_transport())
         self.bus = await self._stack.enter_async_context(Bus(transport))

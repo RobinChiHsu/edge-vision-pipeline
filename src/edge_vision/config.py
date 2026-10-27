@@ -54,7 +54,7 @@ class YoloDetectorConfig(_Strict):
             confidence=self.confidence,
             iou_threshold=self.iou_threshold,
             classes=self.classes,
-            session_factory=(sessions or SessionPool()).get,
+            session_factory=(sessions or SessionPool(max_batch=1)).get,
         )
 
 
@@ -63,6 +63,8 @@ DetectorConfig = Annotated[MotionDetectorConfig | YoloDetectorConfig, Field(disc
 
 class OnnxConfig(_Strict):
     intra_op_threads: int | None = Field(default=None, gt=0)
+    max_batch: int = Field(default=8, ge=1)
+    max_batch_delay_ms: float = Field(default=0.0, ge=0)
 
 
 class TrackerConfig(_Strict):

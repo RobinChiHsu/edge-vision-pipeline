@@ -141,6 +141,8 @@ def test_yolo_detectors_take_their_session_from_the_shared_pool() -> None:
         ({"cameras": [{"id": "gate", "url": "a", "max_fps": 0}]}, "greater than 0"),
         ({"unknown": True}, "Extra inputs"),
         ({"onnx": {"intra_op_threads": 0}}, "greater than 0"),
+        ({"onnx": {"max_batch": 0}}, "greater than or equal to 1"),
+        ({"onnx": {"max_batch_delay_ms": -1}}, "greater than or equal to 0"),
     ],
 )
 def test_rejects_invalid_app_config(overrides: dict[str, object], message: str) -> None:

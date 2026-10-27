@@ -1,4 +1,7 @@
-from collections.abc import Mapping, Sequence
+import threading
+import time
+from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -8,7 +11,14 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from numpy.typing import NDArray
 
-from edge_vision.detectors.yolo import OnnxYoloDetector, SessionPool, decode, letterbox, nms
+from edge_vision.detectors.yolo import (
+    BatchingSession,
+    OnnxYoloDetector,
+    SessionPool,
+    decode,
+    letterbox,
+    nms,
+)
 from edge_vision.geometry import BBox
 
 
@@ -119,14 +129,20 @@ class TestNms:
 class FakeInput:
     name = "images"
 
+    def __init__(self, shape: Sequence[int | str | None] = (1, 3, 640, 640)) -> None:
+        self.shape = shape
+
 
 class FakeSession:
-    def __init__(self, output: NDArray[np.float32]) -> None:
+    def __init__(
+        self, output: NDArray[np.float32], shape: Sequence[int | str | None] = (1, 3, 640, 640)
+    ) -> None:
         self.output = output
+        self.shape = shape
         self.feeds: list[Mapping[str, Any]] = []
 
     def get_inputs(self) -> Sequence[FakeInput]:
-        return [FakeInput()]
+        return [FakeInput(self.shape)]
 
     def run(
         self, output_names: Sequence[str] | None, input_feed: Mapping[str, Any]
@@ -245,3 +261,183 @@ class TestSessionPool:
     def test_rejects_non_positive_thread_count(self) -> None:
         with pytest.raises(ValueError, match="intra_op_threads"):
             SessionPool(intra_op_threads=0)
+
+    def test_wraps_models_with_a_dynamic_batch_axis(self) -> None:
+        pool = SessionPool(
+            intra_op_threads=1,
+            session_factory=lambda path, _: FakeSession(candidates(), ("batch", 3, 32, 32)),
+        )
+        try:
+            assert isinstance(pool.get("dynamic.onnx"), BatchingSession)
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize(
+        ("shape", "max_batch"), [((1, 3, 32, 32), 8), (("batch", 3, 32, 32), 1)]
+    )
+    def test_fixed_batch_models_or_disabled_batching_use_the_plain_session(
+        self, shape: tuple[int | str, ...], max_batch: int
+    ) -> None:
+        session = FakeSession(candidates(), shape)
+        pool = SessionPool(
+            intra_op_threads=1, max_batch=max_batch, session_factory=lambda *_: session
+        )
+
+        assert pool.get("model.onnx") is session
+
+
+class DoublingSession:
+    """Returns each input times two, so every caller can check it got its own slice back."""
+
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+        self.gate = threading.Event()
+        self.gate.set()
+        self.started = threading.Event()
+        self.error: Exception | None = None
+
+    def get_inputs(self) -> Sequence[FakeInput]:
+        return [FakeInput(("batch", 3, 2, 2))]
+
+    def run(
+        self, output_names: Sequence[str] | None, input_feed: Mapping[str, Any]
+    ) -> list[NDArray[np.float32]]:
+        images = input_feed["images"]
+        self.batch_sizes.append(len(images))
+        self.started.set()
+        self.gate.wait(5)
+        if self.error is not None:
+            raise self.error
+        return [images * 2, images.sum(axis=(1, 2, 3))]
+
+
+def image(value: float, size: int = 2) -> NDArray[np.float32]:
+    return np.full((1, 3, size, size), value, dtype=np.float32)
+
+
+@pytest.fixture
+def model() -> DoublingSession:
+    return DoublingSession()
+
+
+@pytest.fixture
+def batching(model: DoublingSession) -> Iterator[BatchingSession]:
+    session = BatchingSession(model, max_batch=3)
+    yield session
+    session.close()
+
+
+def wait_for_queue(session: BatchingSession, size: int) -> None:
+    deadline = time.monotonic() + 5
+    while session._queue.qsize() < size:
+        assert time.monotonic() < deadline, "requests did not queue up"
+        time.sleep(0.001)
+
+
+class TestBatchingSession:
+    def test_requests_waiting_for_a_busy_model_run_as_one_batch(
+        self, model: DoublingSession, batching: BatchingSession
+    ) -> None:
+        model.gate.clear()
+        with ThreadPoolExecutor(4) as pool:
+            first = pool.submit(batching.run, None, {"images": image(1)})
+            model.started.wait(5)
+            rest = [pool.submit(batching.run, None, {"images": image(v)}) for v in (2, 3)]
+            wait_for_queue(batching, 2)
+            model.gate.set()
+
+            results = [future.result(5) for future in [first, *rest]]
+
+        assert model.batch_sizes == [1, 2]
+        for value, (doubled, total) in zip((1, 2, 3), results, strict=True):
+            assert doubled.shape == (1, 3, 2, 2)
+            assert np.all(doubled == value * 2)
+            assert total.tolist() == [value * 12]
+
+    def test_batches_are_capped_at_max_batch(
+        self, model: DoublingSession, batching: BatchingSession
+    ) -> None:
+        model.gate.clear()
+        with ThreadPoolExecutor(5) as pool:
+            first = pool.submit(batching.run, None, {"images": image(0)})
+            model.started.wait(5)
+            rest = [pool.submit(batching.run, None, {"images": image(v)}) for v in range(4)]
+            wait_for_queue(batching, 4)
+            model.gate.set()
+            for future in [first, *rest]:
+                future.result(5)
+
+        assert model.batch_sizes == [1, 3, 1]
+
+    def test_different_input_shapes_run_in_separate_batches(
+        self, model: DoublingSession, batching: BatchingSession
+    ) -> None:
+        model.gate.clear()
+        with ThreadPoolExecutor(3) as pool:
+            first = pool.submit(batching.run, None, {"images": image(0)})
+            model.started.wait(5)
+            small = pool.submit(batching.run, None, {"images": image(1)})
+            large = pool.submit(batching.run, None, {"images": image(1, size=4)})
+            wait_for_queue(batching, 2)
+            model.gate.set()
+
+            assert small.result(5)[0].shape == (1, 3, 2, 2)
+            assert large.result(5)[0].shape == (1, 3, 4, 4)
+            first.result(5)
+
+        assert model.batch_sizes == [1, 1, 1]
+
+    def test_delay_gathers_requests_that_arrive_shortly_after(self, model: DoublingSession) -> None:
+        session = BatchingSession(model, max_batch=4, max_delay=1.0)
+        try:
+            with ThreadPoolExecutor(2) as pool:
+                futures = [pool.submit(session.run, None, {"images": image(v)}) for v in (1, 2)]
+                for future in futures:
+                    future.result(5)
+        finally:
+            session.close()
+
+        assert model.batch_sizes == [2]
+
+    def test_model_errors_reach_every_caller_of_the_batch(
+        self, model: DoublingSession, batching: BatchingSession
+    ) -> None:
+        model.error = RuntimeError("bad model")
+
+        with pytest.raises(RuntimeError, match="bad model"):
+            batching.run(None, {"images": image(1)})
+
+        model.error = None
+        assert np.all(batching.run(None, {"images": image(1)})[0] == 2)
+
+    def test_runs_after_close_are_rejected(self, model: DoublingSession) -> None:
+        session = BatchingSession(model, max_batch=2)
+        session.close()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            session.run(None, {"images": image(1)})
+
+    def test_detector_results_match_unbatched_inference(self) -> None:
+        output = candidates((160, 160, 40, 40, 0.92, 0.01))
+        plain = OnnxYoloDetector(
+            "m.onnx",
+            ["person", "car"],
+            input_size=320,
+            session_factory=lambda _: FakeSession(output),
+        )
+
+        class BatchOutput(FakeSession):
+            def run(
+                self, output_names: Sequence[str] | None, input_feed: Mapping[str, Any]
+            ) -> list[NDArray[np.float32]]:
+                return [np.repeat(self.output, len(input_feed["images"]), axis=0)]
+
+        session = BatchingSession(BatchOutput(output), max_batch=4)
+        try:
+            batched = OnnxYoloDetector(
+                "m.onnx", ["person", "car"], input_size=320, session_factory=lambda _: session
+            )
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            assert batched.detect(frame) == plain.detect(frame)
+        finally:
+            session.close()
