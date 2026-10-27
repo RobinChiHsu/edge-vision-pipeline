@@ -13,8 +13,10 @@ from edge_vision.config import (
     load_config,
 )
 from edge_vision.detectors.motion import MotionDetector
+from edge_vision.detectors.yolo import SessionPool
 from edge_vision.rules import LineRule, ZoneRule
 from edge_vision.tracking import IouTracker
+from tests.test_yolo import FakeSession, candidates
 
 EXAMPLE = """
 database_url: postgresql+asyncpg://edge:${DB_PASSWORD}@db/edge
@@ -115,6 +117,21 @@ def test_yolo_config_builds_onnx_detector(monkeypatch: pytest.MonkeyPatch) -> No
     assert built == [("m.onnx", ["person"])]
 
 
+def test_yolo_detectors_take_their_session_from_the_shared_pool() -> None:
+    requested: list[str] = []
+
+    def factory(path: str, threads: int) -> FakeSession:
+        requested.append(path)
+        return FakeSession(candidates())
+
+    pool = SessionPool(intra_op_threads=1, session_factory=factory)
+    config = YoloDetectorConfig(type="yolo", model=Path("m.onnx"), labels=["person"])
+    config.build(pool)
+    config.build(pool)
+
+    assert requested == ["m.onnx"]
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -123,6 +140,7 @@ def test_yolo_config_builds_onnx_detector(monkeypatch: pytest.MonkeyPatch) -> No
         ({"cameras": [{"id": "Gate/1", "url": "a"}]}, "pattern"),
         ({"cameras": [{"id": "gate", "url": "a", "max_fps": 0}]}, "greater than 0"),
         ({"unknown": True}, "Extra inputs"),
+        ({"onnx": {"intra_op_threads": 0}}, "greater than 0"),
     ],
 )
 def test_rejects_invalid_app_config(overrides: dict[str, object], message: str) -> None:

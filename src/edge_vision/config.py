@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -13,6 +13,9 @@ from .detectors.motion import MotionDetector
 from .geometry import Line, Point, Polygon
 from .rules import Direction, LineRule, Rule, ZoneRule
 from .tracking import IouTracker
+
+if TYPE_CHECKING:
+    from .detectors.yolo import SessionPool
 
 _ENV_REFERENCE = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
 
@@ -28,7 +31,7 @@ class MotionDetectorConfig(_Strict):
     min_area: float = Field(default=400.0, gt=0)
     warmup_frames: int = Field(default=10, ge=0)
 
-    def build(self) -> Detector:
+    def build(self, sessions: SessionPool | None = None) -> Detector:
         return MotionDetector(min_area=self.min_area, warmup_frames=self.warmup_frames)
 
 
@@ -41,8 +44,8 @@ class YoloDetectorConfig(_Strict):
     iou_threshold: float = Field(default=0.45, gt=0, le=1)
     classes: list[str] | None = None
 
-    def build(self) -> Detector:
-        from .detectors.yolo import OnnxYoloDetector
+    def build(self, sessions: SessionPool | None = None) -> Detector:
+        from .detectors.yolo import OnnxYoloDetector, SessionPool
 
         return OnnxYoloDetector(
             str(self.model),
@@ -51,10 +54,15 @@ class YoloDetectorConfig(_Strict):
             confidence=self.confidence,
             iou_threshold=self.iou_threshold,
             classes=self.classes,
+            session_factory=(sessions or SessionPool()).get,
         )
 
 
 DetectorConfig = Annotated[MotionDetectorConfig | YoloDetectorConfig, Field(discriminator="type")]
+
+
+class OnnxConfig(_Strict):
+    intra_op_threads: int | None = Field(default=None, gt=0)
 
 
 class TrackerConfig(_Strict):
@@ -133,6 +141,7 @@ class AppConfig(_Strict):
     database_url: SecretStr
     mqtt: MqttConfig | None = None
     detector: DetectorConfig = Field(default_factory=MotionDetectorConfig)
+    onnx: OnnxConfig = Field(default_factory=OnnxConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     cameras: list[CameraConfig] = Field(min_length=1)
 

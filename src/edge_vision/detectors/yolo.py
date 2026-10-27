@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -28,6 +29,7 @@ class InferenceSession(Protocol):
 
 
 SessionFactory = Callable[[str], InferenceSession]
+RuntimeSessionFactory = Callable[[str, int], InferenceSession]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +104,7 @@ class OnnxYoloDetector:
         classes: Collection[str] | None = None,
         session_factory: SessionFactory | None = None,
     ) -> None:
-        self._session = (session_factory or _onnxruntime_session)(model_path)
+        self._session = (session_factory or SessionPool().get)(model_path)
         self._input_name = self._session.get_inputs()[0].name
         self._labels = list(labels)
         self._input_size = input_size
@@ -127,14 +129,41 @@ class OnnxYoloDetector:
         return self._labels[class_id] if class_id < len(self._labels) else f"class_{class_id}"
 
 
-def _onnxruntime_session(model_path: str) -> InferenceSession:
+class SessionPool:
+    """One inference session per model, shared by every camera that runs it.
+
+    A session per camera would load the weights again and start another intra-op thread pool, so
+    cameras would fight over the cores. ONNX Runtime allows concurrent ``run`` calls on a session.
+    """
+
+    def __init__(
+        self,
+        *,
+        intra_op_threads: int | None = None,
+        session_factory: RuntimeSessionFactory | None = None,
+    ) -> None:
+        if intra_op_threads is not None and intra_op_threads <= 0:
+            raise ValueError("intra_op_threads must be positive")
+        self.intra_op_threads = intra_op_threads or max(1, (os.cpu_count() or 1) // 2)
+        self._session_factory = session_factory or _onnxruntime_session
+        self._sessions: dict[str, InferenceSession] = {}
+
+    def get(self, model_path: str) -> InferenceSession:
+        if model_path not in self._sessions:
+            self._sessions[model_path] = self._session_factory(model_path, self.intra_op_threads)
+        return self._sessions[model_path]
+
+
+def _onnxruntime_session(model_path: str, intra_op_threads: int) -> InferenceSession:
     try:
         import onnxruntime
     except ImportError as exc:
         raise ImportError(
             "OnnxYoloDetector needs onnxruntime, install edge-vision-pipeline[onnx]"
         ) from exc
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = intra_op_threads
     session: InferenceSession = onnxruntime.InferenceSession(
-        model_path, providers=onnxruntime.get_available_providers()
+        model_path, sess_options=options, providers=onnxruntime.get_available_providers()
     )
     return session
