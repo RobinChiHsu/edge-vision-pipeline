@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from numpy.typing import NDArray
 
-from edge_vision.detectors.yolo import OnnxYoloDetector, decode, letterbox, nms
+from edge_vision.detectors.yolo import OnnxYoloDetector, SessionPool, decode, letterbox, nms
 from edge_vision.geometry import BBox
 
 
@@ -186,23 +186,62 @@ class TestOnnxYoloDetector:
             OnnxYoloDetector("model.onnx", ["person"])
 
 
-def test_default_session_uses_available_onnxruntime_providers(
+def test_default_session_uses_available_providers_and_limits_threads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    created: list[tuple[str, list[str]]] = []
+    created: list[tuple[str, int, list[str]]] = []
+
+    class FakeOptions:
+        intra_op_num_threads = 0
 
     class FakeRuntime:
+        SessionOptions = FakeOptions
+
         @staticmethod
         def get_available_providers() -> list[str]:
             return ["CPUExecutionProvider"]
 
         @staticmethod
-        def InferenceSession(path: str, providers: list[str]) -> FakeSession:
-            created.append((path, providers))
+        def InferenceSession(
+            path: str, sess_options: FakeOptions, providers: list[str]
+        ) -> FakeSession:
+            created.append((path, sess_options.intra_op_num_threads, providers))
             return FakeSession(candidates((1, 1, 1, 1, 0.0, 0.0)))
 
     monkeypatch.setitem(__import__("sys").modules, "onnxruntime", FakeRuntime)
 
-    OnnxYoloDetector("model.onnx", ["person"])
+    SessionPool(intra_op_threads=3).get("model.onnx")
 
-    assert created == [("model.onnx", ["CPUExecutionProvider"])]
+    assert created == [("model.onnx", 3, ["CPUExecutionProvider"])]
+
+
+class TestSessionPool:
+    def test_detectors_of_the_same_model_share_one_session(self) -> None:
+        created: list[tuple[str, int]] = []
+
+        def factory(path: str, threads: int) -> FakeSession:
+            created.append((path, threads))
+            return FakeSession(candidates((1, 1, 1, 1, 0.0, 0.0)))
+
+        pool = SessionPool(intra_op_threads=2, session_factory=factory)
+
+        first = OnnxYoloDetector("a.onnx", ["person"], session_factory=pool.get)
+        second = OnnxYoloDetector("a.onnx", ["person"], confidence=0.8, session_factory=pool.get)
+        OnnxYoloDetector("b.onnx", ["person"], session_factory=pool.get)
+
+        assert first._session is second._session
+        assert created == [("a.onnx", 2), ("b.onnx", 2)]
+
+    def test_defaults_to_half_the_cores(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.cpu_count", lambda: 8)
+
+        assert SessionPool().intra_op_threads == 4
+
+    def test_keeps_one_thread_on_a_single_core(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.cpu_count", lambda: 1)
+
+        assert SessionPool().intra_op_threads == 1
+
+    def test_rejects_non_positive_thread_count(self) -> None:
+        with pytest.raises(ValueError, match="intra_op_threads"):
+            SessionPool(intra_op_threads=0)

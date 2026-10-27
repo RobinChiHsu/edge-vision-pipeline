@@ -15,6 +15,7 @@ from typed_mqtt_bus.mqtt import AiomqttTransport
 
 from .config import AppConfig, CameraConfig, MqttConfig
 from .detectors import Frame
+from .detectors.yolo import SessionPool
 from .pipeline import CameraPipeline
 from .rules import LineRule, Rule, ZoneRule
 from .sinks import BusSink, DeliveryStats, EventSink, FanOut, RepositorySink
@@ -85,6 +86,7 @@ class Runtime:
         self._stack = AsyncExitStack()
         self._cameras: list[Camera] = []
         self._fan_out: FanOut | None = None
+        self._sessions = SessionPool(intra_op_threads=config.onnx.intra_op_threads)
         self.repository: SqlEventRepository
         self.bus: Bus
 
@@ -137,7 +139,7 @@ class Runtime:
         await self._stack.enter_async_context(supervisor)
         pipeline = CameraPipeline(
             camera.id,
-            self._config.detector_for(camera).build(),
+            self._config.detector_for(camera).build(self._sessions),
             self._config.tracker.build(),
             [rule.build() for rule in camera.rules],
             fan_out,

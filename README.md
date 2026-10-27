@@ -58,7 +58,9 @@ mosquitto_sub -t 'edge-vision/cameras/+/events'     # the same events over MQTT
      class-aware non-maximum suppression are plain NumPy functions with their own tests.
 
    Detection runs in a thread so the event loop keeps serving the API. `max_fps` caps the work per
-   camera.
+   camera. Cameras that run the same ONNX model share one inference session, so the weights are
+   loaded once and all cameras use one intra-op thread pool, capped by `onnx.intra_op_threads`.
+   `MotionDetector` keeps per-camera background state and stays one instance per camera.
 3. **Tracking.** `IouTracker` matches detections to tracks by IoU against a constant-velocity
    prediction, which keeps identities stable for fast objects at low frame rates. Tracks need
    `min_hits` confirmations before they are reported and survive `max_missed` frames of occlusion.
@@ -93,6 +95,9 @@ mqtt:                       # optional; without it events stay in-process
 detector:                   # default for all cameras
   type: motion
   min_area: 800
+
+onnx:                       # optional; shared by all YOLO cameras
+  intra_op_threads: 2       # default: half the CPU cores, the rest is left for decoding
 
 tracker:
   min_hits: 2
